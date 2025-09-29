@@ -25,3 +25,8 @@ go.work.sum
 .env
 
 .DS_Store
+
+# SimpleDB data directories
+simpledb_data/
+testdata/
+testdata*/
