@@ -13,6 +13,9 @@ func TestNewMgr(t *testing.T) {
 	dataDir := "testdata"
 	logFile := "testlogfile"
 
+	// Create test directory if it doesn't exist
+	os.MkdirAll(dataDir, 0755)
+
 	fileMgr := file.NewFileMgr(dataDir, 32)
 	t.Cleanup(func() {
 		fileMgr.Close()

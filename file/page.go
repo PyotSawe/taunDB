@@ -45,6 +45,11 @@ func (p *Page) Bytes() []byte {
 	return p.bytes
 }
 
+// Contents returns the contents of the page (alias for Bytes)
+func (p *Page) Contents() []byte {
+	return p.bytes
+}
+
 func (p *Page) Size() int {
 	return len(p.bytes)
 }

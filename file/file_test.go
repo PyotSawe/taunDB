@@ -11,6 +11,9 @@ func TestFileMgrWriteRead(t *testing.T) {
 	dataDir := "testdata"
 	testFile := "writetestfile"
 
+	// Create test directory if it doesn't exist
+	os.MkdirAll(dataDir, 0755)
+
 	mgr := NewFileMgr(dataDir, blockSize)
 
 	t.Cleanup(func() {
