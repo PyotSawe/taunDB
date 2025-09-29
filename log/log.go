@@ -121,6 +121,12 @@ func (lm *LogMgr) Log(record *Record) (int, error) {
 	return lm.latestLSN, nil
 }
 
+// Append appends raw data to the log (alias for Log with data)
+func (lm *LogMgr) Append(data []byte) (int, error) {
+	record := NewRecord(data)
+	return lm.Log(record)
+}
+
 // Iterator returns an iterator that iterates over the log records in reverse order.
 func (lm *LogMgr) Iterator() (*iterator, error) {
 	err := lm.Flush()

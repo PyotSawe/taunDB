@@ -2,81 +2,136 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/inelpandzic/simpledb/buffer"
+	"github.com/inelpandzic/simpledb/concurrency"
 	"github.com/inelpandzic/simpledb/file"
-	logmgr "github.com/inelpandzic/simpledb/log"
+	"github.com/inelpandzic/simpledb/log"
+	"github.com/inelpandzic/simpledb/recovery"
 )
 
 func main() {
-	fmt.Println("SimpleDB - Starting...")
+	// Create data directory
+	dataDir := "data/basic_demo"
+	os.RemoveAll(dataDir)
+	os.MkdirAll(dataDir, 0755)
 
-	// Initialize file manager
-	dataDir := "simpledb_data"
-	blockSize := 4096
-	fm := file.NewFileMgr(dataDir, blockSize)
-	defer fm.Close()
+	fmt.Println("=== SimpleDB Basic Demo ===")
+	fmt.Println("Demonstrating: File Manager, Log Manager, Buffer Manager, Concurrency Manager, and Recovery Manager\n")
 
-	// Initialize log manager
-	lm := logmgr.NewLogMgr(fm, "simpledb.log")
+	// Initialize File Manager
+	fmt.Println("1. Initializing File Manager...")
+	fm := file.NewFileMgr(dataDir, 1024)
+	fmt.Printf("   ✓ File Manager created (block size: %d bytes)\n", fm.BlockSize)
 
-	// Initialize buffer manager
-	numBuffers := 8
-	bm := buffer.NewBufferMgr(fm, lm, numBuffers)
+	// Initialize Log Manager
+	fmt.Println("\n2. Initializing Log Manager...")
+	lm := log.NewLogMgr(fm, "simpledb")
+	fmt.Println("   ✓ Log Manager created")
 
-	fmt.Printf("✅ File Manager initialized (block size: %d bytes)\n", blockSize)
-	fmt.Printf("✅ Log Manager initialized\n")
-	fmt.Printf("✅ Buffer Manager initialized (pool size: %d buffers)\n", numBuffers)
+	// Initialize Buffer Manager
+	fmt.Println("\n3. Initializing Buffer Manager...")
+	bm := buffer.NewBufferMgr(fm, lm, 8)
+	fmt.Printf("   ✓ Buffer Manager created (pool size: %d buffers)\n", bm.Available())
 
-	// Test basic functionality
-	testBlock := &file.BlockID{
-		Filename: "test.db",
-		Number:   0,
-	}
+	// Initialize Concurrency Manager
+	fmt.Println("\n4. Initializing Concurrency Manager...")
+	cm := concurrency.NewConcurrencyMgr(bm, 1000) // 1 second timeout
+	fmt.Println("   ✓ Concurrency Manager created")
 
-	// First, create the file by writing an empty page
-	emptyPage := file.NewPage(blockSize)
-	_, err := fm.Write(testBlock, emptyPage)
+	// Initialize Recovery Manager
+	fmt.Println("\n5. Initializing Recovery Manager...")
+	rm := recovery.NewRecoveryMgr(bm, lm, fm)
+	fmt.Println("   ✓ Recovery Manager created and recovery completed")
+
+	// Demonstrate integrated transaction with recovery
+	fmt.Println("\n6. Running integrated transaction demo...")
+	demoIntegratedTransaction(fm, bm, cm, rm)
+
+	fmt.Println("\n=== All components working successfully! ===")
+}
+
+func demoIntegratedTransaction(fm *file.FileMgr, bm *buffer.BufferMgr, cm *concurrency.ConcurrencyMgr, rm *recovery.RecoveryMgr) {
+	// Start a transaction
+	tx, err := cm.BeginTx()
 	if err != nil {
-		log.Fatalf("Failed to create test file: %v", err)
+		panic(err)
 	}
+	fmt.Printf("   Started transaction %d\n", tx.ID())
 
-	// Pin a buffer
-	buf, err := bm.Pin(testBlock)
+	// Log the transaction start
+	lsn, err := rm.WriteStartRecord(tx.ID())
 	if err != nil {
-		log.Fatalf("Failed to pin buffer: %v", err)
+		panic(err)
 	}
+	fmt.Printf("   ✓ START record logged (LSN: %d)\n", lsn)
 
-	// Write some test data
-	testData := []byte("Hello SimpleDB!")
-	_, err = buf.Page().Write(0, testData)
+	// Create and lock a block
+	block := file.NewBlockID("demo_table", 0)
+
+	// Create the file first by writing an empty page
+	emptyPage := file.NewPage(1024)
+	_, err = fm.Write(block, emptyPage)
 	if err != nil {
-		log.Fatalf("Failed to write to buffer: %v", err)
+		panic(err)
 	}
 
-	// Mark buffer as dirty (modified)
-	buf.SetDirty(1)
-
-	fmt.Printf("✅ Test data written to buffer\n")
-	fmt.Printf("📊 Available buffers: %d\n", bm.Available())
-
-	// Unpin the buffer
-	bm.Unpin(buf)
-
-	// Flush all buffers to disk
-	err = bm.FlushAll(0)
+	// Pin buffer with concurrency control
+	buf, err := cm.Pin(block, tx)
 	if err != nil {
-		log.Fatalf("Failed to flush buffers: %v", err)
+		panic(err)
+	}
+	fmt.Printf("   ✓ Block %s pinned and locked\n", block.String())
+
+	// Write data with recovery logging
+	page := buf.Page()
+	oldData := make([]byte, 20)
+	copy(oldData, page.Contents()[0:20])
+
+	newData := []byte("Transaction Data    ") // 20 bytes
+
+	// Log the update BEFORE making the change (Write-Ahead Logging)
+	updateLSN, err := rm.WriteUpdateRecord(tx.ID(), block, 0, oldData, newData)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("   ✓ UPDATE record logged (LSN: %d)\n", updateLSN)
+
+	// Apply the change
+	copy(page.Contents()[0:], newData)
+	buf.SetDirty(updateLSN)
+	fmt.Printf("   ✓ Data updated: '%s'\n", string(newData))
+
+	// Unpin buffer (still locked)
+	cm.Unpin(buf)
+
+	// Commit the transaction
+	err = cm.CommitTx(tx)
+	if err != nil {
+		panic(err)
 	}
 
-	fmt.Printf("✅ All buffers flushed to disk\n")
-	fmt.Printf("📊 Available buffers: %d\n", bm.Available())
+	// Log the commit
+	commitLSN, err := rm.WriteCommitRecord(tx.ID())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("   ✓ Transaction committed (LSN: %d)\n", commitLSN)
 
-	fmt.Println("\n🎯 Next Steps:")
-	fmt.Println("   - ✅ Concurrency Manager (Complete!)")
-	fmt.Println("   - Implement Recovery Manager")
-	fmt.Println("   - Implement Record Management")
-	fmt.Println("   - See PLAN.md for detailed roadmap")
-	fmt.Println("\n🚀 For Concurrency Manager demo, run: go run examples/concurrency_demo.go")
+	// Verify data persistence
+	buf2, err := bm.Pin(block)
+	if err != nil {
+		panic(err)
+	}
+	defer bm.Unpin(buf2)
+
+	verifyData := string(buf2.Page().Contents()[0:20])
+	fmt.Printf("   ✓ Data verification: '%s'\n", verifyData)
+
+	if verifyData == string(newData) {
+		fmt.Println("   ✓ SUCCESS: All components working together!")
+	} else {
+		fmt.Println("   ✗ ERROR: Data integrity issue")
+	}
 }
